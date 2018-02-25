@@ -28,6 +28,10 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 	const EDITOR_SIDEBAR = 'eventssidebareditor.html';
 	const REPEAT_QUESTION = 'eventsrecurrenceexceptionquestion.html';
 
+	const EDIT_ALL = 'all';
+	const EDIT_THISONLY = 'thisOnly';
+	const EDIT_THISANDFUTURE = 'thisAndFuture';
+
 	const context = {
 		fcEvent: null,
 		promise: null,
@@ -75,8 +79,9 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 	 * @param {FcEvent} fcEvent
 	 * @param {SimpleEvent} simpleEvent
 	 * @param {Calendar} calendar
+	 * @param {string} editType
 	 */
-	context.openDialog = (template, resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar) => {
+	context.openDialog = (template, resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar, editType) => {
 		context.fcEvent = fcEvent;
 		context.eventModal = $uibModal.open({
 			appendTo: (template === EDITOR_POPOVER) ?
@@ -102,7 +107,7 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 		context.eventModal.rendered.then(() => context.positionPopover(position));
 		context.eventModal.result.then((result) => {
 			if (result.action === 'proceed') {
-				context.openDialog(EDITOR_SIDEBAR, resolve, reject, unlock, [], scope, fcEvent, simpleEvent, result.calendar);
+				context.openDialog(EDITOR_SIDEBAR, resolve, reject, unlock, [], scope, fcEvent, simpleEvent, result.calendar, editType);
 			} else {
 				if (template === EDITOR_SIDEBAR) {
 					angular.element('#app-content').removeClass('with-app-sidebar');
@@ -110,6 +115,8 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 
 				unlock();
 				context.cleanup();
+
+				// resolve for new event and old event!
 				resolve({
 					calendar: result.calendar,
 					vevent: result.vevent
@@ -118,6 +125,43 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 		}).catch((reason) => {
 			if (template === EDITOR_SIDEBAR) {
 				angular.element('#app-content').removeClass('with-app-sidebar');
+			}
+
+			if (reason === 'delete') {
+				if (editType === EDIT_THISANDFUTURE) {
+					fcEvent.revertCreateForkKeepingRRule();
+
+					unlock();
+					resolve({
+						calendar: fcEvent.vevent.calendar,
+						vevent: fcEvent.vevent
+					});
+					return;
+				} else {
+					const count = fcEvent.removeFromVEvent();
+					if (count === 0) {
+						unlock();
+						reject(reason);
+						return;
+					} else {
+						unlock();
+						resolve({
+							calendar: fcEvent.vevent.calendar,
+							vevent: fcEvent.vevent
+						});
+						return;
+					}
+				}
+			}
+
+			if (reason === 'escape key press' || reason === 'cancel' || reason === 'superseded') {
+				if (editType === EDIT_THISONLY) {
+					fcEvent.revertCreateRecurrenceException();
+				}
+				if (editType === EDIT_THISANDFUTURE) {
+					// TODO - test this
+					fcEvent.revertCreateFork();
+				}
 			}
 
 			if (reason !== 'superseded') {
@@ -129,8 +173,43 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 		});
 	};
 
-	context.openRepeatQuestion = () => {
-		// TODO in followup PR
+	context.openRepeatQuestion = (resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar) => {
+		context.eventModal = $uibModal.open({
+			appendTo: angular.element('#popover-container'),
+			controller: 'EditorRecurrenceQuestionController',
+			templateUrl: REPEAT_QUESTION,
+			windowClass: 'popover'
+		});
+
+		context.eventModal.rendered.then(() => context.positionPopover(position));
+		context.eventModal.result.then((result) => {
+			let editType = EDIT_ALL;
+			if (result.action === 'thisOnly') {
+				fcEvent.createRecurrenceException();
+				simpleEvent = fcEvent.getSimpleEvent();
+				editType = EDIT_THISONLY;
+			} else if (result.action === 'thisAndAllFuture') {
+				if (fcEvent.recurrenceDetails.firstOccurrence) {
+					editType = EDIT_ALL;
+				} else {
+					fcEvent.createFork();
+					simpleEvent = fcEvent.getSimpleEvent();
+					editType = EDIT_THISANDFUTURE;
+				}
+			}
+
+			// skip popover on small devices
+			if (context.showPopover() && !settings.skipPopover) {
+				context.openDialog(EDITOR_POPOVER, resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar, editType);
+			} else {
+				context.openDialog(EDITOR_SIDEBAR, resolve, reject, unlock, [], scope, fcEvent, simpleEvent, calendar, editType);
+			}
+		}).catch((reason) => {
+			// only way to trigger this is to hit escape or click outside the dialog,
+			// just cancel editing in that case
+			unlock();
+			reject(reason);
+		});
 	};
 
 	/**
@@ -164,17 +243,16 @@ app.service('EventsEditorDialogService', function($uibModal, constants, settings
 			const calendar = (fcEvent.vevent) ? fcEvent.vevent.calendar : null;
 			const simpleEvent = fcEvent.getSimpleEvent();
 
-			if (fcEvent.repeating) {
-
+			if (fcEvent.recurrenceDetails.recurring) {
+				context.openRepeatQuestion(resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar);
+				return;
 			}
-
-			console.log(calendar, fcEvent, fcEvent.vevent, simpleEvent);
 
 			// skip popover on small devices
 			if (context.showPopover() && !settings.skipPopover) {
-				context.openDialog(EDITOR_POPOVER, resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar);
+				context.openDialog(EDITOR_POPOVER, resolve, reject, unlock, position, scope, fcEvent, simpleEvent, calendar, EDIT_ALL);
 			} else {
-				context.openDialog(EDITOR_SIDEBAR, resolve, reject, unlock, [], scope, fcEvent, simpleEvent, calendar);
+				context.openDialog(EDITOR_SIDEBAR, resolve, reject, unlock, [], scope, fcEvent, simpleEvent, calendar, EDIT_ALL);
 			}
 		});
 
